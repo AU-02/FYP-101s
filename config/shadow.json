@@ -1,0 +1,91 @@
+{
+    "name": "depth_estimation_test1",
+    "phase": "train", // train or val
+    "gpu_ids": [
+       0
+    ],
+    "path": { // ✅ Updated to reflect depth estimation project paths
+        "log": "logs",
+        "tb_logger": "tb_logger",
+        "results": "results",
+        "checkpoint": "checkpoint",
+        "resume_state": null // ✅ Start training from scratch for depth estimation
+    },
+    "datasets": {
+        "train": {
+            "name": "DepthTrainSet", // ✅ Updated dataset name
+            "mode": "depth", // ✅ Changed from HR to depth-specific mode
+            "dataroot": "../../data/depth_dataset/train", // ✅ Updated path to depth dataset
+            "datatype": "img", // ✅ Depth data format
+            "batch_size": 8, // ✅ Lower batch size to avoid memory issues with depth maps
+            "num_workers": 4,
+            "use_shuffle": true,
+            "data_len": -1
+        },
+        "val": {
+            "name": "DepthValSet", // ✅ Updated dataset name
+            "mode": "depth",
+            "dataroot": "../../data/depth_dataset/val", // ✅ Updated path to validation dataset
+            "datatype": "img", // ✅ Depth data format
+            "data_len": -1
+        }
+    },
+    "model": {
+        "which_model_G": "sr3", // ✅ Keep using SR3 architecture
+        "finetune_norm": false,
+        "unet": {
+            "in_channel": 2, // ✅ Thermal + noise channels for depth estimation
+            "out_channel": 1, // ✅ Single-channel output for depth maps
+            "inner_channel": 64,
+            "norm_groups": 16,
+            "channel_multiplier": [
+                1,
+                2,
+                4,
+                8
+            ],
+            "attn_res": [
+                 16
+            ],
+            "res_blocks": 2,
+            "dropout": 0
+        },
+        "beta_schedule": { // ✅ Keep beta schedule but adjust steps for depth estimation
+            "train": {
+                "schedule": "linear",
+                "n_timestep": 500, // ✅ Fewer steps for faster convergence
+                "linear_start": 1e-4,
+                "linear_end": 0.02
+            },
+            "val": {
+                "schedule": "linear",
+                "n_timestep": 500,
+                "linear_start": 1e-4,
+                "linear_end": 0.02
+            }
+        },
+        "diffusion": {
+            "image_size": 256, // ✅ Reduced size for depth maps to save memory
+            "channels": 1, // ✅ Single-channel for depth maps
+            "conditional": true
+        }
+    },
+    "train": {
+        "n_iter": 5e6, // ✅ Lower number of iterations for depth task
+        "val_freq": 1000, // ✅ More frequent validation since depth maps are faster to compute
+        "save_checkpoint_freq": 5000,
+        "print_freq": 200,
+        "optimizer": {
+            "type": "adam",
+            "lr": 1e-4 // ✅ Higher learning rate since depth estimation converges faster
+        },
+        "ema_scheduler": {
+            "step_start_ema": 5000,
+            "update_ema_every": 1,
+            "ema_decay": 0.9999
+        }
+    },
+    "wandb": {
+        "project": "depth_estimation_project" // ✅ Updated project name for depth estimation
+    }
+}
