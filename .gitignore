@@ -1,0 +1,38 @@
+# Ignore Python bytecode files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore virtual environment directories
+venv/
+env/
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore log files
+*.log
+
+# Ignore configuration and environment files
+.env
+*.env
+*.ini
+*.json
+
+# Ignore experiment folder from D drive
+D:/FYP-101s/experiments/
+
+# Ignore model checkpoints and temporary training files
+*.pth
+*.h5
+
+# Ignore IDE/editor files
+.vscode/
+.idea/
+
+# Ignore Mac system files
+.DS_Store
+
+# Ignore Windows system files
+Thumbs.db
