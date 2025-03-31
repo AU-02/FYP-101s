@@ -20,7 +20,8 @@ env/
 *.ini
 *.json
 
-
+# Ignore experiment folder from D drive
+D:/FYP-101s/experiments/
 
 # Ignore model checkpoints and temporary training files
 *.pth

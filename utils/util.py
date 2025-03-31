@@ -159,17 +159,17 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
-def find_class_in_module(target_cls_name, module):
-    target_cls_name = target_cls_name.replace('_', '').lower()
+def find_class_in_module(HR_cls_name, module):
+    HR_cls_name = HR_cls_name.replace('_', '').lower()
     clslib = importlib.import_module(module)
     cls = None
     for name, clsobj in clslib.__dict__.items():
-        if name.lower() == target_cls_name:
+        if name.lower() == HR_cls_name:
             cls = clsobj
 
     if cls is None:
         print("In %s, there should be a class whose name matches %s in lowercase without underscore(_)" % (
-            module, target_cls_name))
+            module, HR_cls_name))
         exit(0)
 
     return cls

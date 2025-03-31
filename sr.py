@@ -1,12 +1,15 @@
 import sys
 import os
+import time
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-sys.path.append(os.path.abspath("D:/FYP-001"))
+sys.path.insert(0, os.path.abspath("D:/FYP-001"))
+
 import torch
 from torch.utils.data import DataLoader
 from dataloader.MS2_dataset import DataLoader_MS2
 
 import data as Data
+import matplotlib.pyplot as plt
 import model as Model
 import argparse
 import logging
@@ -21,10 +24,9 @@ import utils
 import random
 from model.sr3_modules import transformer
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('-c', '--config', type=str, default='config/sr_sr3_16_128.json',
+    parser.add_argument('-c', '--config', type=str, default='config/shadow.json',
                         help='JSON file for configuration')
     parser.add_argument('-p', '--phase', type=str, choices=['train', 'val'],
                         help='Run either train(training) or val(generation)', default='train')
@@ -57,12 +59,21 @@ if __name__ == "__main__":
     else:
         wandb_logger = None
 
+    # Fix random seed for reproducibility
     random.seed(1234)
     np.random.seed(1234)
     torch.manual_seed(1234)
     torch.cuda.manual_seed_all(1234)
 
-    # ✅ Updated to use MS2 dataloader for thermal data
+    # Assign device (GPU/CPU)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if torch.cuda.is_available():
+        logger.info(f"Using GPU: {torch.cuda.get_device_name(device)} (ID: {torch.cuda.current_device()})")
+    else:
+        logger.info("Using CPU")
+
+    # Load datasets
     for phase, dataset_opt in opt['datasets'].items():
         if phase == 'train' and args.phase != 'val':
             train_set = DataLoader_MS2(
@@ -74,7 +85,8 @@ if __name__ == "__main__":
                 set_length=1,
                 set_interval=1
             )
-            train_loader = torch.utils.data(train_set, batch_size=1, shuffle=True)
+            train_loader = torch.utils.data.DataLoader(train_set, batch_size=1, shuffle=True)
+
         elif phase == 'val':
             val_set = DataLoader_MS2(
                 dataset_opt['dataroot'],
@@ -85,12 +97,13 @@ if __name__ == "__main__":
                 set_length=1,
                 set_interval=1
             )
-            val_loader = torch.utils.data(val_set, batch_size=1, shuffle=False)
+            val_loader = torch.utils.data.DataLoader(val_set, batch_size=1, shuffle=False)
 
-    logger.info('Initial Dataset Finished')
+    logger.info('Initial Dataset Loaded')
 
-    diffusion = Model.create_model(opt)
-    logger.info('Initial Model Finished')
+    # Load Model to Device
+    diffusion = Model.create_model(opt).to(device)
+    logger.info('Model Created')
 
     current_step = diffusion.begin_step
     current_epoch = diffusion.begin_epoch
@@ -98,97 +111,34 @@ if __name__ == "__main__":
 
     diffusion.set_new_noise_schedule(opt['model']['beta_schedule'][opt['phase']], schedule_phase=opt['phase'])
 
-    if opt['phase'] == 'train':
-        while current_step < n_iter:
-            current_epoch += 1
-            for _, train_data in enumerate(train_loader):
-                current_step += 1
-                if current_step > n_iter:
-                    break
+    # Define Saving Path
+    save_path = os.path.join(opt['path']['checkpoint'], 'final_model.pth')
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-                # ✅ Fix for thermal input and depth map
-                input_img = train_data['tgt_image'].cuda()
-                gt_depth = train_data['tgt_depth_gt'].cuda()
+    # Save the model immediately without further training
+    logger.info(f"Manually stopping at iteration {current_step}...")
+    torch.save(diffusion.state_dict(), save_path)  # Save model weights
+    diffusion.save_network(current_epoch, current_step)  # Save network configuration
+    logger.info(f"Model saved manually at {save_path}")
 
-                diffusion.feed_data({'input': input_img, 'target': gt_depth})
-                diffusion.optimize_parameters()
+    logger.info("Training is stopped immediately. The model has been saved.")
 
-                if current_step % opt['train']['print_freq'] == 0:
-                    logs = diffusion.get_current_log()
-                    message = '<epoch:{:3d}, iter:{:8,d}> '.format(current_epoch, current_step)
-                    for k, v in logs.items():
-                        message += '{:s}: {:.4e} '.format(k, v)
-                        tb_logger.add_scalar(k, v, current_step)
-                    logger.info(message)
-
-                    if wandb_logger:
-                        wandb_logger.log_metrics(logs)
-
-                # ✅ Fix for depth map evaluation
-                if current_step % opt['train']['val_freq'] == 0:
-                    avg_mae = 0.0
-                    avg_rmse = 0.0
-                    idx = 0
-                    result_path = '{}/{}'.format(opt['path']['results'], current_epoch)
-                    os.makedirs(result_path, exist_ok=True)
-
-                    diffusion.set_new_noise_schedule(opt['model']['beta_schedule']['val'], schedule_phase='val')
-                    for _, val_data in enumerate(val_loader):
-                        idx += 1
-                        diffusion.feed_data(val_data)
-                        diffusion.test(continous=False)
-                        visuals = diffusion.get_current_visuals()
-
-                        pred_depth = visuals['SR'].squeeze().cpu().numpy()
-                        gt_depth = visuals['HR'].squeeze().cpu().numpy()
-
-                        # ✅ Save as depth maps
-                        np.save(f'{result_path}/{current_step}_{idx}_depth_pred.npy', pred_depth)
-                        np.save(f'{result_path}/{current_step}_{idx}_depth_gt.npy', gt_depth)
-
-                        mae = np.mean(np.abs(pred_depth - gt_depth))
-                        rmse = np.sqrt(np.mean((pred_depth - gt_depth) ** 2))
-
-                        avg_mae += mae
-                        avg_rmse += rmse
-
-                    avg_mae /= idx
-                    avg_rmse /= idx
-
-                    logger.info('# Validation # MAE: {:.4e}, RMSE: {:.4e}'.format(avg_mae, avg_rmse))
-
-                    if wandb_logger:
-                        wandb_logger.log_metrics({
-                            'validation/mae': avg_mae,
-                            'validation/rmse': avg_rmse,
-                            'validation/val_step': val_step
-                        })
-                        val_step += 1
-
-                if current_step % opt['train']['save_checkpoint_freq'] == 0:
-                    logger.info('Saving models and training states.')
-                    diffusion.save_network(current_epoch, current_step)
-
-            if wandb_logger:
-                wandb_logger.log_metrics({'epoch': current_epoch-1})
-
-        logger.info('End of training.')
-
-    else:
-        logger.info('Begin Model Evaluation.')
-        # ✅ Evaluation phase preserved for consistency
+    # Optionally, you can perform evaluation or other tasks after saving the model
+    if args.phase == 'val':
+        logger.info('Begin Model Evaluation...')
         avg_mae = 0.0
         avg_rmse = 0.0
         idx = 0
-        result_path = '{}'.format(opt['path']['results'])
-        os.makedirs(result_path, exist_ok=True)
+
         for _, val_data in enumerate(val_loader):
             idx += 1
             diffusion.feed_data(val_data)
-            diffusion.test(continous=True)
+            diffusion.test(continuous=True)
             visuals = diffusion.get_current_visuals()
+
             pred_depth = visuals['SR'].squeeze().cpu().numpy()
             gt_depth = visuals['HR'].squeeze().cpu().numpy()
+            
             mae = np.mean(np.abs(pred_depth - gt_depth))
             rmse = np.sqrt(np.mean((pred_depth - gt_depth) ** 2))
             avg_mae += mae
@@ -196,4 +146,4 @@ if __name__ == "__main__":
 
         avg_mae /= idx
         avg_rmse /= idx
-        logger.info('# Final Evaluation # MAE: {:.4e}, RMSE: {:.4e}'.format(avg_mae, avg_rmse))
+        logger.info(f'# Final Evaluation # MAE: {avg_mae:.4e}, RMSE: {avg_rmse:.4e}')

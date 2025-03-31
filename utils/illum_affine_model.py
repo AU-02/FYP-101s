@@ -53,27 +53,27 @@ def srgb_to_rgb(value: torch.FloatTensor):
 
 def fit_brightening_params(
     input: torch.Tensor,
-    target: torch.Tensor,
+    HR: torch.Tensor,
     mask: torch.Tensor,
     mask_thresh: float = 0.95,
     N_min: int = 16  # minimum num of valid pixels for fitting
 ):
 
-    # assume 3-dimensional tensor with (C, H, W) for input and target
+    # assume 3-dimensional tensor with (C, H, W) for input and HR
     # assume 2-dimensional tensor with (H, W) for mask and ids
-    assert input.size()[1:] == target.size()[1:] == mask.size()
-    assert input.size(0) == 3 and target.size(0) == 3
+    assert input.size()[1:] == HR.size()[1:] == mask.size()
+    assert input.size(0) == 3 and HR.size(0) == 3
     assert 0.0 <= mask.min() and mask.max() <= 1.0
 
     # Use only (apparently shadowed) region to avoid errors around boundary
     default_w, default_b = [1.0, 1.0, 1.0], [0.0, 0.0, 0.0]
 
     shadow = input.numpy()
-    shadow_free = target.numpy()
+    shadow_free = HR.numpy()
     cond = (mask > mask_thresh)
 
-    W = torch.ones_like(target).float()
-    B = torch.zeros_like(target).float()
+    W = torch.ones_like(HR).float()
+    B = torch.zeros_like(HR).float()
 
     ids = torch.zeros_like(mask)
     if len(torch.unique(ids[cond])) == 0:

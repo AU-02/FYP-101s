@@ -14,10 +14,10 @@ class BaseModel():
     def feed_data(self, data):
         """
         Feed data into the model
-        Expected input: {'input': thermal_input, 'target': depth_gt}
+        Expected input: {'input': thermal_input, 'HR': depth_gt}
         """
         self.input = data['input'].to(self.device)
-        self.target = data['target'].to(self.device)
+        self.HR = data['HR'].to(self.device)
 
     def optimize_parameters(self):
         pass
@@ -27,7 +27,7 @@ class BaseModel():
         visuals = {
             'input': self.input.detach().cpu(),
             'predicted': self.output.detach().cpu(),
-            'ground_truth': self.target.detach().cpu()
+            'ground_truth': self.HR.detach().cpu()
         }
         return visuals
 

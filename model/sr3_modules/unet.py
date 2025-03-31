@@ -71,7 +71,8 @@ class Upsample(nn.Module):
 class Downsample(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.conv = nn.Conv2d(dim, dim, 3, 2, 1)
+        self.conv = nn.Conv2d(dim, dim, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0))
+
 
     def forward(self, x):
         return self.conv(x)
@@ -81,18 +82,20 @@ class Downsample(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, dim, dim_out, groups=32, dropout=0):
+    def __init__(self, dim, dim_out, dropout=0):
         super().__init__()
+        self.norm = None
         self.block = nn.Sequential(
-            nn.GroupNorm(groups, dim),
             Swish(),
             nn.Dropout(dropout) if dropout != 0 else nn.Identity(),
             nn.Conv2d(dim, dim_out, 3, padding=1)
         )
 
     def forward(self, x):
+        if self.norm is None or self.norm.num_channels != x.shape[1]:
+            self.norm = nn.GroupNorm(min(32, x.shape[1]), x.shape[1]).to(x.device)
+        x = self.norm(x)  # ✅ Dynamically create based on shape
         return self.block(x)
-
 
 class ResnetBlock(nn.Module):
     def __init__(self, dim, dim_out, noise_level_emb_dim=None, dropout=0, use_affine_level=False, norm_groups=32):
@@ -100,10 +103,10 @@ class ResnetBlock(nn.Module):
         self.noise_func = FeatureWiseAffine(
             noise_level_emb_dim, dim_out, use_affine_level)
 
-        self.block1 = Block(dim, dim_out, groups=norm_groups)
-        self.block2 = Block(dim_out, dim_out, groups=norm_groups, dropout=dropout)
-        self.res_conv = nn.Conv2d(
-            dim, dim_out, 1) if dim != dim_out else nn.Identity()
+        self.block1 = Block(dim, dim_out, dropout=dropout)
+        self.block2 = Block(dim_out, dim_out, dropout=dropout)
+
+        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
     def forward(self, x, time_emb):
         b, c, h, w = x.shape
@@ -118,8 +121,8 @@ class SelfAttention(nn.Module):
         super().__init__()
 
         self.n_head = n_head
+        self.norm = nn.GroupNorm(norm_groups if in_channel >= norm_groups else 1, in_channel)
 
-        self.norm = nn.GroupNorm(norm_groups, in_channel)
         self.qkv = nn.Conv2d(in_channel, in_channel * 3, 1, bias=False)
         self.out = nn.Conv2d(in_channel, in_channel, 1)
 
@@ -130,27 +133,22 @@ class SelfAttention(nn.Module):
 
         norm = self.norm(input)
         qkv = self.qkv(norm).view(batch, n_head, head_dim * 3, height, width)
-        query, key, value = qkv.chunk(3, dim=2)  # bhdyx
+        query, key, value = qkv.chunk(3, dim=2)
 
-        attn = torch.einsum(
-            "bnchw, bncyx -> bnhwyx", query, key
-        ).contiguous() / math.sqrt(channel)
-        attn = attn.view(batch, n_head, height, width, -1)
-        attn = torch.softmax(attn, -1)
+        attn = torch.einsum("bnchw, bncyx -> bnhwyx", query, key) / math.sqrt(channel)
+        attn = torch.softmax(attn.view(batch, n_head, height, width, -1), dim=-1)
         attn = attn.view(batch, n_head, height, width, height, width)
 
-        out = torch.einsum("bnhwyx, bncyx -> bnchw", attn, value).contiguous()
+        out = torch.einsum("bnhwyx, bncyx -> bnchw", attn, value)
         out = self.out(out.view(batch, channel, height, width))
 
         return out + input
-
-
 class ResnetBlocWithAttn(nn.Module):
     def __init__(self, dim, dim_out, *, noise_level_emb_dim=None, norm_groups=32, dropout=0, with_attn=False):
         super().__init__()
         self.with_attn = with_attn
         self.res_block = ResnetBlock(
-            dim, dim_out, noise_level_emb_dim, norm_groups=norm_groups, dropout=dropout)
+             dim, dim_out, noise_level_emb_dim, norm_groups=min(32, dim_out), dropout=dropout)
         if with_attn:
             self.attn = SelfAttention(dim_out, norm_groups=norm_groups)
 
@@ -166,9 +164,9 @@ class UNet(nn.Module):
         self,
         in_channel=2,  # Thermal + Noise
         out_channel=1,  # Single-channel depth map output
-        inner_channel=32,
+        inner_channel=64,
         norm_groups=32,
-        channel_mults=(1, 2, 4, 8, 8),
+        channel_mults=(1, 2, 4, 8),
         attn_res=(8),
         res_blocks=3,
         dropout=0,
@@ -176,6 +174,10 @@ class UNet(nn.Module):
         image_size=128
     ):
         super().__init__()
+        
+        self.proj_conv = nn.Conv2d(inner_channel * channel_mults[-1], inner_channel * channel_mults[-2], kernel_size=1)
+        self.add_module("proj_conv", self.proj_conv)  # Force registration
+
 
         if with_noise_level_emb:
             noise_level_channel = inner_channel
@@ -201,7 +203,7 @@ class UNet(nn.Module):
             channel_mult = inner_channel * channel_mults[ind]
             for _ in range(0, res_blocks):
                 downs.append(ResnetBlocWithAttn(
-                    pre_channel, channel_mult, noise_level_emb_dim=noise_level_channel, norm_groups=norm_groups, dropout=dropout, with_attn=use_attn))
+                    pre_channel, channel_mult, noise_level_emb_dim=noise_level_channel,  norm_groups=min(32, channel_mult), dropout=dropout, with_attn=use_attn))
                 feat_channels.append(channel_mult)
                 pre_channel = channel_mult
             if not is_last:
@@ -211,9 +213,9 @@ class UNet(nn.Module):
         self.downs = nn.ModuleList(downs)
 
         self.mid = nn.ModuleList([
-            ResnetBlocWithAttn(pre_channel, pre_channel, noise_level_emb_dim=noise_level_channel, norm_groups=norm_groups,
+            ResnetBlocWithAttn(pre_channel, pre_channel, noise_level_emb_dim=noise_level_channel,norm_groups=min(32, pre_channel),
                                dropout=dropout, with_attn=True),
-            ResnetBlocWithAttn(pre_channel, pre_channel, noise_level_emb_dim=noise_level_channel, norm_groups=norm_groups,
+            ResnetBlocWithAttn(pre_channel, pre_channel, noise_level_emb_dim=noise_level_channel, norm_groups=min(32, pre_channel),
                                dropout=dropout, with_attn=False)
         ])
 
@@ -224,7 +226,7 @@ class UNet(nn.Module):
             channel_mult = inner_channel * channel_mults[ind]
             for _ in range(0, res_blocks+1):
                 ups.append(ResnetBlocWithAttn(
-                    pre_channel+feat_channels.pop(), channel_mult, noise_level_emb_dim=noise_level_channel, norm_groups=norm_groups,
+                    pre_channel+feat_channels.pop(), channel_mult, noise_level_emb_dim=noise_level_channel, norm_groups=min(32, channel_mult),
                         dropout=dropout, with_attn=use_attn))
                 pre_channel = channel_mult
             if not is_last:
@@ -233,17 +235,16 @@ class UNet(nn.Module):
 
         self.ups = nn.ModuleList(ups)
 
-        self.final_conv = Block(pre_channel, default(out_channel, in_channel), groups=norm_groups)
+        self.final_conv = Block(pre_channel, out_channel)
+
 
     def forward(self, x, time):
         x_lr = x[:, 0, :, :].unsqueeze(1)  # Thermal
         x_noisy = x[:, 1, :, :].unsqueeze(1)  # Noise
-        # updated_mask = self.mask_update(x_noisy, x_mask)
-        # x_updated_mask = updated_mask.detach()
+        
         x = torch.cat((x_lr, x_noisy), dim=1)
 
-        t = self.noise_level_mlp(time) if exists(
-            self.noise_level_mlp) else None
+        t = self.noise_level_mlp(time) if exists(self.noise_level_mlp) else None
 
         feats = []
         for layer in self.downs:
@@ -251,6 +252,7 @@ class UNet(nn.Module):
                 x = layer(x, t)
             else:
                 x = layer(x)
+            print(f"Down Layer Output Shape: {x.shape}")
             feats.append(x)
 
         for layer in self.mid:
@@ -262,15 +264,43 @@ class UNet(nn.Module):
         for layer in self.ups:
             if isinstance(layer, ResnetBlocWithAttn):
                 feat = feats.pop()
-                # if x.shape[2]!=feat.shape[2] or x.shape[3]!=feat.shape[3]:
-                #     feat = F.interpolate(feat, x.shape[2:])
-                x = layer(torch.cat((x, feat), dim=1), t)
-            else:
-                x = layer(x)
+                print(f"Before Concat -> x: {x.shape}, feat: {feat.shape}")
 
-        return self.final_conv(x)
+                if feat.shape[1] != x.shape[1]:
+                    print(f"Channel Mismatch -> x: {x.shape}, feat: {feat.shape}")
+                    if not hasattr(self, 'proj_conv') or self.proj_conv.in_channels != feat.shape[1] or self.proj_conv.out_channels != x.shape[1]:
+                        self.proj_conv = nn.Conv2d(feat.shape[1], x.shape[1], kernel_size=1).to(feat.device)
+                        self.add_module("proj_conv", self.proj_conv)
+                    feat = self.proj_conv(feat)
+                    print(f"Fixed feat shape -> {feat.shape}")
 
+                if feat.shape[-2:] != x.shape[-2:]:
+                    print(f"Spatial Mismatch -> x: {x.shape[-2:]}, feat: {feat.shape[-2:]}")
+                    feat = F.interpolate(feat, size=(x.shape[-2], x.shape[-1]), mode="bilinear", align_corners=False)
+                    print(f"Fixed feat shape -> {feat.shape}")
 
+                x = torch.cat((x, feat), dim=1)
+                print(f"After Concat Shape -> {x.shape}")
+
+                expected_channels = layer.res_block.block1.block[2].in_channels
+                if x.shape[1] != expected_channels:
+                    print(f"Projecting {x.shape[1]} -> {expected_channels}")
+                    proj_conv = nn.Conv2d(x.shape[1], expected_channels, kernel_size=1).to(x.device)
+                    x = proj_conv(x)
+
+                x = layer(x, t)
+                print(f"After Layer Shape -> {x.shape}")
+
+        # ✅ Final layer output check
+        if x is None:
+            print("🚨 x is None before final projection!")
+        else:
+            print(f"✅ Final Layer Output Shape: {x.shape}")
+        # 🚨 Final output projection
+        x = self.final_conv(x)
+
+        # ✅ Fix -> Ensure x is returned!
+        return x
 class FCN(nn.Module):
     def __init__(self):
         super(FCN, self).__init__()

@@ -124,7 +124,7 @@ def prepare(img_path, out_path, n_worker, sizes=(16, 128), resample=Image.BICUBI
 
         # start worker processes, monitor results
         for i in range(n_worker):
-            proc = Process(target=prepare_process_worker, args=(wctx, file_subsets[i]))
+            proc = Process(HR=prepare_process_worker, args=(wctx, file_subsets[i]))
             proc.start()
             worker_threads.append(proc)
         

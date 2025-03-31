@@ -3,6 +3,8 @@ from collections import OrderedDict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
 import os
 import model.networks as networks
 from .base_model import BaseModel
@@ -18,6 +20,7 @@ class EMAHelper(object):
             module = module.module
         for name, param in module.named_parameters():
             if param.requires_grad:
+                print(f"✅ Registering EMA shadow for {name}")
                 self.shadow[name] = param.data.clone()
 
     def update(self, module):
@@ -25,6 +28,16 @@ class EMAHelper(object):
             module = module.module
         for name, param in module.named_parameters():
             if param.requires_grad:
+                if name not in self.shadow:
+                    print(f"✅ Initializing EMA shadow for {name}")
+                    self.shadow[name] = param.data.clone()
+
+                # ✅ Handle shape mismatches dynamically
+                if self.shadow[name].shape != param.data.shape:
+                    print(f"⚠️ Shape mismatch in EMA update for {name}: {self.shadow[name].shape} -> {param.data.shape}")
+                    self.shadow[name] = param.data.clone()
+
+                # ✅ EMA Update
                 self.shadow[name].data = (1. - self.mu) * param.data + self.mu * self.shadow[name].data
 
     def ema(self, module):
@@ -32,7 +45,8 @@ class EMAHelper(object):
             module = module.module
         for name, param in module.named_parameters():
             if param.requires_grad:
-                param.data.copy_(self.shadow[name].data)
+                if name in self.shadow:
+                    param.data.copy_(self.shadow[name].data)
 
     def ema_copy(self, module):
         if isinstance(module, nn.DataParallel):
@@ -52,8 +66,9 @@ class EMAHelper(object):
     def load_state_dict(self, state_dict):
         self.shadow = state_dict
 
-class DDPM(BaseModel):
+class DDPM(BaseModel, nn.Module):
     def __init__(self, opt):
+        nn.Module.__init__(self)
         super(DDPM, self).__init__(opt)
         self.netG = self.set_device(networks.define_G(opt))
         self.schedule_phase = None
@@ -68,40 +83,165 @@ class DDPM(BaseModel):
             self.log_dict = OrderedDict()
         self.load_network()
         self.print_network()
+        
+    # Inside your model's forward method
+    def forward(self, x_in):
+        # Print initial input shapes
+        print(f"Initial input shapes: {x_in['HR'].shape}, {x_in['SR'].shape}")
+
+        # Assuming your model uses some layers, for example, self.netG
+        # If self.netG is a part of the DDPM model, print its details
+        print(f"Initial input to netG: {x_in['HR'].shape}")
+        
+        # Process through layers
+        x = self.netG(x_in)  # Process through your model's generator or network
+        print(f"After netG: {x.shape}")
+
+        # If you have any intermediate layers or transformations, check them
+        # For example, if there's a convolution layer
+        # x = self.conv_layer(x)
+        # print(f"After conv_layer: {x.shape}")
+
+        # Print the final output before any transformation
+        final_output = x  # Replace this with your final layer output
+        print(f"Final output before any post-processing: {final_output.shape}")
+        
+        # Check if the output is a valid tensor
+        if final_output.numel() == 0:
+            print("Error: Final output tensor is empty!")
+        else:
+            print(f"Final output shape: {final_output.shape}")
+        
+        return final_output
+
+
 
     # ✅ Updated to handle thermal + depth data
     def feed_data(self, data):
         self.data = self.set_device(data)
 
+        # ✅ Map keys to handle both training and testing scenarios
+        if 'tgt_image' in data and 'tgt_depth_gt' in data:
+            self.data['input'] = {
+                'HR': self.data['tgt_image'],
+                'SR': self.data['tgt_depth_gt']
+            }
+        elif 'HR' in data and 'SR' in data:
+            self.data['input'] = {
+                'HR': self.data['HR'],
+                'SR': self.data['SR']
+            }
+        else:
+            raise KeyError(f"Invalid data keys in self.data: {self.data.keys()}")
+
     # ✅ Updated to reflect depth estimation
     def optimize_parameters(self):
         self.optG.zero_grad()
+        
+        # Debugging output
+        print(f"self.data['input'] type: {type(self.data['input'])}")
+        
+        # Fix: Wrap the tensor in a dictionary (assuming 'HR' and 'SR' are the same for now)
+        if isinstance(self.data['input'], torch.Tensor):
+            print("Converting Tensor to dictionary format")
+            self.data['input'] = {
+                'HR': self.data['input'], 
+                'SR': self.data['input']
+            }
+        
+        # Pass the corrected dictionary to the model
         predicted_depth = self.netG(self.data['input'])
-        l_pix = torch.mean(torch.abs(predicted_depth - self.data['target']))  # MAE for depth
+        
+        # ✅ Fix: Assign predicted output to self.output
+        self.output = predicted_depth
+        
+        # Ensure 'HR' is available in self.data for the loss calculation
+        l_pix = torch.mean(torch.abs(predicted_depth - self.data['input']['HR']))  # MAE for depth
+        
         l_pix.backward()
         self.optG.step()
         self.ema_helper.update(self.netG)
         self.log_dict['l_pix'] = l_pix.item()
 
+
     # ✅ Updated for depth output
-    def test(self, continous=False):
+    def test(self, continuous=False):
         self.netG.eval()
+
         with torch.no_grad():
+            # ✅ Handle missing keys more gracefully
+            input_data = self.data.get('input', {})
+            if 'HR' not in input_data or 'SR' not in input_data:
+                raise KeyError(f"Missing keys in self.data['input']: {input_data.keys()}")
+
+            x_in = {
+                'HR': input_data['HR'],
+                'SR': input_data['SR']
+            }
+
+            # ✅ Ensure SR and HR are 4D tensors (N, C, H, W)
+            if x_in['SR'].dim() == 3:
+                print(f"Unsqueezing SR from {x_in['SR'].shape}")
+                x_in['SR'] = x_in['SR'].unsqueeze(1)
+
+            if x_in['HR'].dim() == 3:
+                print(f"Unsqueezing HR from {x_in['HR'].shape}")
+                x_in['HR'] = x_in['HR'].unsqueeze(1)
+
+            # ✅ Fix channel mismatch
+            if x_in['HR'].shape[1] != x_in['SR'].shape[1]:
+                print(f"Fixing channel mismatch: HR {x_in['HR'].shape[1]} -> SR {x_in['SR'].shape[1]}")
+                x_in['HR'] = x_in['HR'].repeat(1, x_in['SR'].shape[1] // x_in['HR'].shape[1], 1, 1)
+
+            # ✅ Fix spatial mismatch
+            if x_in['HR'].shape[-2:] != x_in['SR'].shape[-2:]:
+                print(f"Resizing SR from {x_in['SR'].shape[-2:]} to {x_in['HR'].shape[-2:]}")
+                x_in['SR'] = F.interpolate(
+                    x_in['SR'],
+                    size=x_in['HR'].shape[-2:],
+                    mode='bilinear',
+                    align_corners=False
+                )
+
+            # ✅ Pass through the model
             if isinstance(self.netG, nn.DataParallel):
-                self.output = self.netG.module.predict(self.data['input'], continous)
+                self.output = self.netG.module(x_in)
             else:
-                self.output = self.netG.predict(self.data['input'], continous)
+                self.output = self.netG(x_in)
+
+            # ✅ Make sure output is valid before resizing
+            if self.output is not None and self.output.dim() > 0 and self.output.numel() > 0:
+                if self.output.shape != x_in['HR'].shape:
+                    print(f"Resizing output from {self.output.shape} to {x_in['HR'].shape}")
+                    self.output = F.interpolate(
+                        self.output,
+                        size=x_in['HR'].shape[-2:],
+                        mode='bilinear',
+                        align_corners=False
+                    )
+            else:
+                print(f"⚠️ Model output is empty or invalid — output.shape = {self.output.shape if self.output is not None else 'None'}")
+
         self.netG.train()
 
     # ✅ Updated for depth sample generation
     def sample(self, batch_size=1, continous=False):
         self.netG.eval()
         with torch.no_grad():
+            # Ensure the image size matches the expected size for the model (e.g., 256)
+            image_size = 256
+            # Generate random noise of the correct shape, matching the smallest resolution expected in the network
+            random_noise = torch.randn((batch_size, 64, 4, 256)).to(self.device)  # Match smallest resolution here (4, 256)
+
+            # Call the p_sample_loop with the generated random noise
             if isinstance(self.netG, nn.DataParallel):
-                self.output = self.netG.module.sample(batch_size, continous)
+                self.output = self.netG.module.p_sample_loop(random_noise, continous)
             else:
-                self.output = self.netG.sample(batch_size, continous)
-        self.netG.train()
+                self.output = self.netG.p_sample_loop(random_noise, continous)
+
+        self.netG.train()  # Return model to training mode after inference
+
+
 
     def set_loss(self):
         if isinstance(self.netG, nn.DataParallel):
@@ -124,9 +264,13 @@ class DDPM(BaseModel):
             out_dict['SAM'] = self.output.detach().float().cpu()
         else:
             out_dict['Predicted'] = self.output.detach().float().cpu()
-            out_dict['Target'] = self.data['target'].detach().float().cpu()
-            out_dict['Input'] = self.data['input'].detach().float().cpu()
+            out_dict['HR'] = self.data['input']['HR'].detach().float().cpu()
+            out_dict['SR'] = self.data['input']['SR'].detach().float().cpu()
+
+            # ✅ Fix: Use 'HR' or 'SR' explicitly
+            out_dict['Input'] = self.data['input'].get('HR', self.data['input']['SR']).detach().float().cpu()
         return out_dict
+
 
     def print_network(self):
         s, n = self.get_network_description(self.netG)
