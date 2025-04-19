@@ -3,12 +3,12 @@ import logging
 import torch
 import torch.nn as nn
 from torch.nn import init
-from torch.nn import modules
-logger = logging.getLogger('base')
-####################
-# initialize
-####################
 
+logger = logging.getLogger('base')
+
+####################
+# Initialization Methods
+####################
 
 def weights_init_normal(m, std=0.02):
     classname = m.__class__.__name__
@@ -58,43 +58,41 @@ def weights_init_orthogonal(m):
 
 
 def init_weights(net, init_type='kaiming', scale=1, std=0.02):
-    logger.info('Initialization method [{:s}]'.format(init_type))
+    logger.info(f'Initialization method [{init_type}]')
     if init_type == 'normal':
         weights_init_normal_ = functools.partial(weights_init_normal, std=std)
         net.apply(weights_init_normal_)
     elif init_type == 'kaiming':
-        weights_init_kaiming_ = functools.partial(
-            weights_init_kaiming, scale=scale)
+        weights_init_kaiming_ = functools.partial(weights_init_kaiming, scale=scale)
         net.apply(weights_init_kaiming_)
     elif init_type == 'orthogonal':
         net.apply(weights_init_orthogonal)
     else:
-        raise NotImplementedError(
-            'initialization method [{:s}] not implemented'.format(init_type))
-
+        raise NotImplementedError(f'Initialization method [{init_type}] not implemented')
 
 ####################
-# define network
+# Define Generator Network
 ####################
 
-
-# Generator
 def define_G(opt):
     model_opt = opt['model']
+
+    # 🔀 Import based on selected model
     if model_opt['which_model_G'] == 'ddpm':
         from .ddpm_modules import diffusion, unet
     elif model_opt['which_model_G'] == 'sr3':
-        from .sr3_modules import diffusion, unet, transformer
+        from .sr3_modules import diffusion, unet
     elif model_opt['which_model_G'] == 'ddim':
-        from .ddim import ddm, unet, restoration
+        from .ddim import ddm, unet
 
-    if ('norm_groups' not in model_opt['unet']) or model_opt['unet']['norm_groups'] is None:
-        model_opt['unet']['norm_groups']=32
+    # 🧠 Set fallback for norm_groups if not provided
+    if 'norm_groups' not in model_opt['unet'] or model_opt['unet']['norm_groups'] is None:
+        model_opt['unet']['norm_groups'] = 32
 
-    # ✅ Updated for thermal + depth input/output
+    # 🧱 Build UNet backbone
     model = unet.UNet(
-        in_channel=model_opt['unet']['in_channel'],  # ✅ Thermal + noise input
-        out_channel=model_opt['unet']['out_channel'],  # ✅ Single-channel depth output
+        in_channel=model_opt['unet']['in_channel'],          # e.g. 2 → thermal + noise
+        out_channel=model_opt['unet']['out_channel'],        # e.g. 1 → dense depth
         norm_groups=model_opt['unet']['norm_groups'],
         inner_channel=model_opt['unet']['inner_channel'],
         channel_mults=model_opt['unet']['channel_multiplier'],
@@ -104,21 +102,21 @@ def define_G(opt):
         image_size=model_opt['diffusion']['image_size']
     )
 
-    # ✅ Updated loss type to MAE for depth estimation
+    # 🌀 Wrap with Gaussian Diffusion
     netG = diffusion.GaussianDiffusion(
         model,
         image_size=model_opt['diffusion']['image_size'],
         channels=model_opt['diffusion']['channels'],
-        loss_type='mae',    # ✅ MAE instead of L1/L2
-        conditional=model_opt['diffusion']['conditional'],
-        schedule_opt=model_opt['beta_schedule']['train']
+        loss_type='mae',
+        conditional=model_opt['diffusion']['conditional']
     )
 
+    # ✅ Initialize weights
     if opt['phase'] == 'train':
-        init_weights(netG, init_type='orthogonal')  # ✅ Best for depth estimation
+        init_weights(netG, init_type='orthogonal')
 
-    if opt['gpu_ids'] and opt['distributed']:
-        assert torch.cuda.is_available()
+    # ✅ Multi-GPU support
+    if opt.get('gpu_ids') and not opt.get('distributed', False):
         netG = nn.DataParallel(netG)
 
     return netG

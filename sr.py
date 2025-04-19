@@ -9,7 +9,6 @@ from torch.utils.data import DataLoader
 from dataloader.MS2_dataset import DataLoader_MS2
 
 import data as Data
-import matplotlib.pyplot as plt
 import model as Model
 import argparse
 import logging
@@ -17,16 +16,78 @@ import core.logger as Logger
 import core.metrics as Metrics
 from core.wandb_logger import WandbLogger
 from torch.utils.tensorboard import SummaryWriter
-import os
 import numpy as np
 import wandb
-import utils
 import random
-from model.sr3_modules import transformer
+import torchvision.transforms.functional as TF
+import json  # for saving effective config
+
+# ✅ Define local image saving function
+def save_tensor_image(tensor, path):
+    # Check if the tensor is empty
+    if tensor.numel() == 0:
+        raise ValueError(f"Tensor is empty. Cannot save image. Tensor shape: {tensor.shape}")
+    
+    # Ensure the tensor is on CPU
+    tensor = tensor.detach().cpu()
+    
+    # Debug: Print the original tensor shape
+    print("Original tensor shape:", tensor.shape)
+    
+    # If tensor is 4D but in channel-last format (e.g., [N, H, W, C]), convert to channel-first
+    if tensor.ndimension() == 4 and tensor.shape[-1] == 1:
+        print("Detected channel-last format in a 4D tensor. Permuting to channel-first...")
+        tensor = tensor.permute(0, 3, 1, 2)
+        print("New tensor shape after permute:", tensor.shape)
+    
+    # Handle 2D (H, W) by unsqueezing to (1, H, W)
+    if tensor.ndimension() == 2:
+        tensor = tensor.unsqueeze(0)
+    
+    # Handle 4D (N, C, H, W) -> take first image
+    if tensor.ndimension() == 4:
+        tensor = tensor[0]
+    
+    # Now tensor should be 3D (C, H, W)
+    if tensor.ndimension() != 3:
+        raise ValueError(f"Unexpected tensor shape: {tensor.shape}. Expected 3D tensor.")
+    
+    # Debug: Print shape before potential transpose
+    print("Shape before any transpose:", tensor.shape)
+    
+    # Optionally, if you need to check for swapped dimensions, add a conditional transpose here.
+    # For example:
+    C, H, W = tensor.shape
+    # if H > W:
+    #     print(f"Detected H > W (H={H}, W={W}). Transposing spatial dimensions.")
+    #     tensor = tensor.transpose(-2, -1)
+    #     print("New tensor shape after transpose:", tensor.shape)
+    
+    # If >3 channels, select first channel only (grayscale)
+    if tensor.shape[0] > 3:
+        tensor = tensor[:1]
+    
+    # If grayscale (1-channel), expand to RGB for saving
+    if tensor.shape[0] == 1:
+        tensor = tensor.expand(3, -1, -1)
+    
+    # Normalize to [0, 1] range
+    tensor = (tensor - tensor.min()) / (tensor.max() - tensor.min() + 1e-5)
+    
+    # Convert to PIL image
+    from torchvision.transforms import functional as TF
+    img = TF.to_pil_image(tensor)
+    
+    # Ensure the directory exists
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    
+    # Save the image
+    img.save(path)
+    print(f"Saved image to {path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('-c', '--config', type=str, default='config/shadow.json',
+    parser.add_argument('-c', '--config', type=str, default='D:/FYP-200_git/FYP-101s/config/shadow.json',
                         help='JSON file for configuration')
     parser.add_argument('-p', '--phase', type=str, choices=['train', 'val'],
                         help='Run either train(training) or val(generation)', default='train')
@@ -59,21 +120,14 @@ if __name__ == "__main__":
     else:
         wandb_logger = None
 
-    # Fix random seed for reproducibility
     random.seed(1234)
     np.random.seed(1234)
     torch.manual_seed(1234)
     torch.cuda.manual_seed_all(1234)
 
-    # Assign device (GPU/CPU)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Using device: {device}")
 
-    if torch.cuda.is_available():
-        logger.info(f"Using GPU: {torch.cuda.get_device_name(device)} (ID: {torch.cuda.current_device()})")
-    else:
-        logger.info("Using CPU")
-
-    # Load datasets
     for phase, dataset_opt in opt['datasets'].items():
         if phase == 'train' and args.phase != 'val':
             train_set = DataLoader_MS2(
@@ -86,7 +140,6 @@ if __name__ == "__main__":
                 set_interval=1
             )
             train_loader = torch.utils.data.DataLoader(train_set, batch_size=1, shuffle=True)
-
         elif phase == 'val':
             val_set = DataLoader_MS2(
                 dataset_opt['dataroot'],
@@ -101,7 +154,6 @@ if __name__ == "__main__":
 
     logger.info('Initial Dataset Loaded')
 
-    # Load Model to Device
     diffusion = Model.create_model(opt).to(device)
     logger.info('Model Created')
 
@@ -111,39 +163,96 @@ if __name__ == "__main__":
 
     diffusion.set_new_noise_schedule(opt['model']['beta_schedule'][opt['phase']], schedule_phase=opt['phase'])
 
-    # Define Saving Path
+    logger.info("Start Training Loop...")
+    start_time = time.time()
+
+    while current_step < n_iter:
+        current_epoch += 1
+        for _, train_data in enumerate(train_loader):
+            current_step += 1
+
+            diffusion.feed_data(train_data)
+            diffusion.optimize_parameters()
+
+            if current_step % opt['train']['print_freq'] == 0:
+                visuals = diffusion.get_current_visuals()
+                logger.info(f"Predicted shape: {visuals['Predicted'].shape}")  # Log the predicted shape
+
+                tb_logger.add_scalar('loss/l_pix', diffusion.log_dict['l_pix'], current_step)
+                logger.info(f"[Step {current_step}] l_pix: {diffusion.log_dict['l_pix']:.6f}")
+
+                save_tensor_image(visuals['Input'], f"{opt['path']['results']}/input_{current_step}.png")
+                save_tensor_image(visuals['GT'], f"{opt['path']['results']}/gt_{current_step}.png")
+                # Save only the predicted depth map (if Predicted has 2 channels, use channel 0)
+                if visuals['Predicted'].shape[1] == 2:
+                    pred_to_save = visuals['Predicted'][:, 0:1, :, :]
+                else:
+                    pred_to_save = visuals['Predicted']
+                save_tensor_image(pred_to_save, f"{opt['path']['results']}/pred_{current_step}.png")
+
+            if current_step % opt['train']['val_freq'] == 0:
+                logger.info(f"Validation at step {current_step}...")
+                avg_mae, avg_rmse = 0.0, 0.0
+                val_step = 0
+                for val_data in val_loader:
+                    diffusion.feed_data(val_data)
+                    diffusion.test(continuous=True)
+                    visuals = diffusion.get_current_visuals()
+                    pred = visuals['Predicted'].squeeze().cpu().numpy()
+                    gt = visuals['GT'].squeeze().cpu().numpy()
+                    val_mae = np.mean(np.abs(pred - gt))
+                    val_rmse = np.sqrt(np.mean((pred - gt) ** 2))
+                    avg_mae += val_mae
+                    avg_rmse += val_rmse
+                    val_step += 1
+                avg_mae /= val_step
+                avg_rmse /= val_step
+                logger.info(f"VAL --> MAE: {avg_mae:.4f}, RMSE: {avg_rmse:.4f}")
+                tb_logger.add_scalar("val/mae", avg_mae, current_step)
+                tb_logger.add_scalar("val/rmse", avg_rmse, current_step)
+
+            if current_step % opt['train']['save_checkpoint_freq'] == 0:
+                diffusion.save_network(current_epoch, current_step)
+
+            if current_step >= n_iter:
+                break
+
     save_path = os.path.join(opt['path']['checkpoint'], 'final_model.pth')
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    torch.save(diffusion.state_dict(), save_path)
+    diffusion.save_network(current_epoch, current_step)
+    logger.info(f"Model saved at final step {current_step} to {save_path}")
 
-    # Save the model immediately without further training
-    logger.info(f"Manually stopping at iteration {current_step}...")
-    torch.save(diffusion.state_dict(), save_path)  # Save model weights
-    diffusion.save_network(current_epoch, current_step)  # Save network configuration
-    logger.info(f"Model saved manually at {save_path}")
+    elapsed = time.time() - start_time
+    logger.info(f"Finished Training in {elapsed / 60:.2f} minutes.")
 
-    logger.info("Training is stopped immediately. The model has been saved.")
+    # Save the effective configuration to a JSON file after training
+    effective_config_path = os.path.join(opt['path']['checkpoint'], 'effective_opt.json')
+    with open(effective_config_path, 'w') as f:
+        json.dump(opt, f, indent=4)
+    logger.info("Saved effective configuration to %s", effective_config_path)
 
-    # Optionally, you can perform evaluation or other tasks after saving the model
+    # Save the full model for future loading without rebuilding the architecture
+    full_model_path = os.path.join(opt['path']['checkpoint'], 'full_model.pth')
+    torch.save(diffusion, full_model_path)
+    logger.info("Saved full model to %s", full_model_path)
+
     if args.phase == 'val':
         logger.info('Begin Model Evaluation...')
         avg_mae = 0.0
         avg_rmse = 0.0
         idx = 0
-
         for _, val_data in enumerate(val_loader):
             idx += 1
             diffusion.feed_data(val_data)
             diffusion.test(continuous=True)
             visuals = diffusion.get_current_visuals()
-
-            pred_depth = visuals['SR'].squeeze().cpu().numpy()
-            gt_depth = visuals['HR'].squeeze().cpu().numpy()
-            
+            pred_depth = visuals['Predicted'].squeeze().cpu().numpy()
+            gt_depth = visuals['GT'].squeeze().cpu().numpy()
             mae = np.mean(np.abs(pred_depth - gt_depth))
             rmse = np.sqrt(np.mean((pred_depth - gt_depth) ** 2))
             avg_mae += mae
             avg_rmse += rmse
-
         avg_mae /= idx
         avg_rmse /= idx
         logger.info(f'# Final Evaluation # MAE: {avg_mae:.4e}, RMSE: {avg_rmse:.4e}')

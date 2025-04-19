@@ -61,21 +61,23 @@ class Swish(nn.Module):
 class Upsample(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.up = nn.Upsample(scale_factor=2, mode="nearest")
+        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
         self.conv = nn.Conv2d(dim, dim, 3, padding=1)
 
+        self.act = nn.ReLU(inplace=True)
     def forward(self, x):
-        return self.conv(self.up(x))
+        x = self.up(x)
+        x = self.conv(x)
+        return self.act(x)
 
 
 class Downsample(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.conv = nn.Conv2d(dim, dim, kernel_size=(3, 1), stride=(2, 1), padding=(1, 0))
-
-
+        self.conv = nn.Conv2d(dim, dim, kernel_size=3, stride=2, padding=1)
     def forward(self, x):
         return self.conv(x)
+
 
 
 # building block modules
@@ -298,6 +300,9 @@ class UNet(nn.Module):
             print(f"✅ Final Layer Output Shape: {x.shape}")
         # 🚨 Final output projection
         x = self.final_conv(x)
+        print(f"After final convolution: {x.shape}")
+        
+        self.output = x
 
         # ✅ Fix -> Ensure x is returned!
         return x

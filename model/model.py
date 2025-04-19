@@ -114,17 +114,16 @@ class DDPM(BaseModel, nn.Module):
         
         return final_output
 
-
-
     # ✅ Updated to handle thermal + depth data
     def feed_data(self, data):
         self.data = self.set_device(data)
+        logger.info(f"self.data: {self.data}")
 
-        # ✅ Map keys to handle both training and testing scenarios
+        # Reassign keys so that thermal image is HR and depth ground truth is SR.
         if 'tgt_image' in data and 'tgt_depth_gt' in data:
             self.data['input'] = {
-                'HR': self.data['tgt_image'],
-                'SR': self.data['tgt_depth_gt']
+                'HR': self.data['tgt_image'],      # Thermal image goes to HR
+                'SR': self.data['tgt_depth_gt']      # Depth ground truth goes to SR
             }
         elif 'HR' in data and 'SR' in data:
             self.data['input'] = {
@@ -134,35 +133,49 @@ class DDPM(BaseModel, nn.Module):
         else:
             raise KeyError(f"Invalid data keys in self.data: {self.data.keys()}")
 
+        print("After feed_data, HR shape:", self.data['input']['HR'].shape)
+        print("After feed_data, SR shape:", self.data['input']['SR'].shape)
+
     # ✅ Updated to reflect depth estimation
     def optimize_parameters(self):
         self.optG.zero_grad()
-        
-        # Debugging output
-        print(f"self.data['input'] type: {type(self.data['input'])}")
-        
-        # Fix: Wrap the tensor in a dictionary (assuming 'HR' and 'SR' are the same for now)
+
+        logger.info(f"self.data['input'] type: {type(self.data['input'])}")
+
+        # Wrap the tensor in a dictionary if needed.
         if isinstance(self.data['input'], torch.Tensor):
-            print("Converting Tensor to dictionary format")
+            logger.info("Converting Tensor to dictionary format")
             self.data['input'] = {
-                'HR': self.data['input'], 
+                'HR': self.data['input'],
                 'SR': self.data['input']
             }
+
+        # Pass the input dictionary to the model.
+        predicted_loss = self.netG(self.data['input'])
         
-        # Pass the corrected dictionary to the model
-        predicted_depth = self.netG(self.data['input'])
+        # Retrieve predicted depth and processed HR from the underlying module if needed.
+        if hasattr(self.netG, "module"):
+            self.output = self.netG.module.predicted_depth
+            processed_HR = self.netG.module.processed_HR
+        else:
+            self.output = self.predicted_depth
+            processed_HR = self.processed_HR
+
+        # Log the shape of the predicted depth tensor.
+        logger.info(f"Predicted depth shape: {self.output.shape}")
         
-        # ✅ Fix: Assign predicted output to self.output
-        self.output = predicted_depth
-        
-        # Ensure 'HR' is available in self.data for the loss calculation
-        l_pix = torch.mean(torch.abs(predicted_depth - self.data['input']['HR']))  # MAE for depth
-        
-        l_pix.backward()
+        # Log predicted depth statistics.
+        logger.info("Predicted depth - min: %s", self.output.min().item())
+        logger.info("Predicted depth - max: %s", self.output.max().item())
+        logger.info("Predicted depth - mean: %s", self.output.mean().item())
+
+        # Compute the pixel loss (MAE) between predicted depth and processed HR.
+        l_pix = torch.mean(torch.abs(self.output - processed_HR))
+
+        predicted_loss.backward()
         self.optG.step()
         self.ema_helper.update(self.netG)
         self.log_dict['l_pix'] = l_pix.item()
-
 
     # ✅ Updated for depth output
     def test(self, continuous=False):
@@ -221,6 +234,7 @@ class DDPM(BaseModel, nn.Module):
                     )
             else:
                 print(f"⚠️ Model output is empty or invalid — output.shape = {self.output.shape if self.output is not None else 'None'}")
+            
 
         self.netG.train()
 
@@ -241,8 +255,6 @@ class DDPM(BaseModel, nn.Module):
 
         self.netG.train()  # Return model to training mode after inference
 
-
-
     def set_loss(self):
         if isinstance(self.netG, nn.DataParallel):
             self.netG.module.set_loss(self.device)
@@ -260,15 +272,41 @@ class DDPM(BaseModel, nn.Module):
     # ✅ Updated for depth-based output
     def get_current_visuals(self, need_LR=True, sample=False):
         out_dict = OrderedDict()
+
         if sample:
             out_dict['SAM'] = self.output.detach().float().cpu()
         else:
-            out_dict['Predicted'] = self.output.detach().float().cpu()
-            out_dict['HR'] = self.data['input']['HR'].detach().float().cpu()
-            out_dict['SR'] = self.data['input']['SR'].detach().float().cpu()
+            # Predicted output remains as is.
+            if self.output is None:
+                logger.warning("⚠️ 'Predicted' output is None!")
+                out_dict['Predicted'] = torch.zeros_like(self.data['input']['HR']).detach().cpu()
+            else:
+                out_dict['Predicted'] = self.output.detach().float().cpu()
 
-            # ✅ Fix: Use 'HR' or 'SR' explicitly
-            out_dict['Input'] = self.data['input'].get('HR', self.data['input']['SR']).detach().float().cpu()
+            # Ground truth (GT) should now come from the depth ground truth, which is in SR.
+            if 'SR' in self.data['input']:
+                gt = self.data['input']['SR'].detach().float().cpu()
+                # Remove or comment out the following block if it’s causing the issue:
+                # if gt.ndimension() == 4:
+                #     _, _, H, W = gt.shape
+                #     if H > W:
+                #         print("Detected GT tensor with H > W. Transposing GT tensor dimensions.")
+                #         gt = gt.transpose(-2, -1)  # swap height and width
+                out_dict['GT'] = gt
+            else:
+                logger.warning("⚠️ 'SR' (ground truth) is missing!")
+                out_dict['GT'] = torch.zeros_like(self.data['input']['HR']).detach().cpu()
+
+            # For the input image, use HR (the thermal image)
+            if 'HR' in self.data['input']:
+                out_dict['Input'] = self.data['input']['HR'].detach().float().cpu()
+            else:
+                logger.warning("⚠️ 'HR' (input) is missing!")
+                out_dict['Input'] = torch.zeros_like(self.data['input']['SR']).detach().cpu()
+
+            # Optionally, you can still keep a key for the original SR if needed.
+            out_dict['SR'] = self.data['input'].get('SR', torch.zeros_like(self.data['input']['HR'])).detach().float().cpu()
+
         return out_dict
 
 

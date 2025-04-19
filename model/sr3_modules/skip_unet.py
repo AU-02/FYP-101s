@@ -175,10 +175,9 @@ class UNet(nn.Module):
 
         self.final_conv = nn.Sequential(
             nn.BatchNorm2d(pre_channel),
-            nn.ReLU(),
-            nn.Conv2d(pre_channel, out_channel, 3, padding=1),
-            nn.Sigmoid()
+            nn.Conv2d(pre_channel, out_channel, 3, padding=1)  # No activation here
         )
+
 
     def forward(self, x, noise_level):
         noise_embed = self.noise_mlp(noise_level)

@@ -279,108 +279,121 @@ class GaussianDiffusion(nn.Module):
 
         print(f"x_in keys: {x_in.keys()}")
 
-        # ✅ Ensure input tensors exist and are valid
+        # Ensure input tensors exist and are valid
         if 'HR' not in x_in:
             raise KeyError("'HR' key is missing from x_in")
         if 'SR' not in x_in:
             raise KeyError("'SR' key is missing from x_in")
 
-        # ✅ Handle empty tensors or None values
+        # Handle empty tensors or None values
         if x_in['HR'] is None or x_in['HR'].numel() == 0:
             print("⚠️ x_in['HR'] is empty — replacing with zeros")
             x_in['HR'] = torch.zeros((1, 1, 256, 256)).to(self.betas.device)
-
         if x_in['SR'] is None or x_in['SR'].numel() == 0:
             print("⚠️ x_in['SR'] is empty — replacing with zeros")
             x_in['SR'] = torch.zeros((1, 1, 256, 256)).to(self.betas.device)
 
-        # ✅ Ensure tensors are 4D -> (N, C, H, W)
+        # Convert from channels-last to channels-first if needed.
+        if x_in['HR'].ndim == 4 and x_in['HR'].shape[-1] in [1, 2, 3]:
+            print("Converting HR from channels-last to channels-first")
+            x_in['HR'] = x_in['HR'].permute(0, 3, 1, 2)
+        if x_in['SR'].ndim == 4 and x_in['SR'].shape[-1] in [1, 2, 3]:
+            print("Converting SR from channels-last to channels-first")
+            x_in['SR'] = x_in['SR'].permute(0, 3, 1, 2)
+
+        # Ensure tensors are 4D -> (N, C, H, W)
         if x_in['HR'].ndim == 3:
             x_in['HR'] = x_in['HR'].unsqueeze(0)
-
         if x_in['SR'].ndim == 3:
             x_in['SR'] = x_in['SR'].unsqueeze(0)
 
-        # ✅ Fix mismatched channels by repeating or resizing
+        # Fix channel mismatches by repeating if needed.
         if x_in['HR'].shape[1] != 2:
             print(f"Fixing HR channel mismatch: {x_in['HR'].shape[1]} -> 2")
             x_in['HR'] = x_in['HR'].repeat(1, 2, 1, 1)
-
         if x_in['SR'].shape[1] != 2:
             print(f"Fixing SR channel mismatch: {x_in['SR'].shape[1]} -> 2")
             x_in['SR'] = x_in['SR'].repeat(1, 2, 1, 1)
 
-        # ✅ Fix mismatched spatial dimensions using interpolation
+        # Fix spatial dimensions: make SR match HR.
         if x_in['SR'].shape[-2:] != x_in['HR'].shape[-2:]:
             print(f"Resizing SR from {x_in['SR'].shape[-2:]} to {x_in['HR'].shape[-2:]}")
             x_in['SR'] = F.interpolate(
                 x_in['SR'],
-                size=x_in['HR'].shape[-2:], 
-                mode='bilinear', 
-                align_corners=False
-            )
-
-        # ✅ Debugging shapes after fixing
-        print(f"x_in['HR'] shape: {x_in['HR'].shape}, type: {type(x_in['HR'])}")
-        print(f"x_in['SR'] shape: {x_in['SR'].shape}, type: {type(x_in['SR'])}")
-
-        # ✅ Generate noisy version of HR for training
-        x_start = x_in['HR']
-        n, c, h, w = x_start.shape
-        t = torch.randint(low=0, high=self.num_timesteps, size=(n // 2 + 1,)).to(x_start.device)
-        t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
-
-        b = self.betas
-        a = (1 - b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
-        e = torch.randn_like(x_start)
-        x_noisy = x_start * a.sqrt() + e * (1.0 - a).sqrt()
-
-        # ✅ Ensure x_noisy and SR have the same dimensions
-        if x_in['SR'].shape[-2:] != x_noisy.shape[-2:]:
-            x_in['SR'] = F.interpolate(
-                x_in['SR'],
-                size=x_noisy.shape[-2:], 
-                mode='bilinear', 
-                align_corners=False
-            )
-
-        # ✅ Fix channel mismatch after interpolation
-        if x_in['SR'].shape[1] != x_noisy.shape[1]:
-            x_in['SR'] = x_in['SR'].repeat(1, x_noisy.shape[1] // x_in['SR'].shape[1], 1, 1)
-
-        # ✅ Concatenate SR and noisy tensor along channel dimension
-        print(f"Final SR shape before concat: {x_in['SR'].shape}")
-        print(f"Final noisy shape before concat: {x_noisy.shape}")
-
-        x_recon = self.denoise_fn(
-            torch.cat([x_in['SR'], x_noisy], dim=1), t.float()
-        )
-
-        # ✅ Resize output to match HR shape if needed
-        if x_recon.shape != x_in['HR'].shape:
-            print(f"Resizing x_recon from {x_recon.shape} to {x_in['HR'].shape}")
-            x_recon = F.interpolate(
-                x_recon,
                 size=x_in['HR'].shape[-2:],
                 mode='bilinear',
                 align_corners=False
             )
 
+        print(f"x_in['HR'] shape: {x_in['HR'].shape}, type: {type(x_in['HR'])}")
+        print(f"x_in['SR'] shape: {x_in['SR'].shape}, type: {type(x_in['SR'])}")
+
+        # Store the processed HR for later use.
+        self.processed_HR = x_in['HR']
+
+        # Generate noisy version of HR for training
+        x_start = x_in['SR']
+        n, c, h, w = x_start.shape
+        print(f"x_start shape: {x_start.shape}")
+        t = torch.randint(low=0, high=self.num_timesteps, size=(n // 2 + 1,)).to(x_start.device)
+        t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
+        print(f"t shape: {t.shape}")
+        b = self.betas
+        a = (1 - b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
+        e = torch.randn_like(x_start)
+        x_noisy = x_start * a.sqrt() + e * (1.0 - a).sqrt()
+        print(f"x_noisy shape: {x_noisy.shape}")
+
+        # Ensure x_noisy and SR have the same spatial dimensions
+        if x_in['SR'].shape[-2:] != x_noisy.shape[-2:]:
+            print(f"Resizing SR to match x_noisy: {x_in['SR'].shape[-2:]} -> {x_noisy.shape[-2:]}")
+            x_in['SR'] = F.interpolate(
+                x_in['SR'],
+                size=x_noisy.shape[-2:],
+                mode='bilinear',
+                align_corners=False
+            )
+        if x_in['SR'].shape[1] != x_noisy.shape[1]:
+            x_in['SR'] = x_in['SR'].repeat(1, x_noisy.shape[1] // x_in['SR'].shape[1], 1, 1)
+        print(f"x_in['SR'] shape after matching x_noisy: {x_in['SR'].shape}")
+
+        print(f"Final SR shape before concat: {x_in['SR'].shape}")
+        print(f"Final noisy shape before concat: {x_noisy.shape}")
+        x_cat = torch.cat([x_in['HR'], x_noisy], dim=1)
+        print(f"x_cat shape (after concat): {x_cat.shape}")
+
+        x_recon = self.denoise_fn(x_cat, t.float())
+        print(f"x_recon shape after denoise_fn: {x_recon.shape}")
+
+        # Resize x_recon to match HR spatial dimensions exactly.
+        target_size = x_in['HR'].shape[-2:]  # (H, W)
+        print(f"Target size for interpolation: {target_size}")
+        if x_recon.numel() == 0:
+            raise ValueError("x_recon is empty before interpolation!")
+        x_recon = F.interpolate(x_recon, size=target_size, mode='bilinear', align_corners=False)
+        print(f"x_recon shape after interpolation: {x_recon.shape}")
+
         if x_recon.shape[1] != x_in['HR'].shape[1]:
+            print(f"Channel mismatch: x_recon channels {x_recon.shape[1]} vs HR channels {x_in['HR'].shape[1]}")
             x_recon = x_recon.repeat(1, x_in['HR'].shape[1] // x_recon.shape[1], 1, 1)
+            print(f"x_recon shape after channel repeat: {x_recon.shape}")
 
-        # ✅ Final loss calculation
+        # Store predicted depth for logging purposes.
+        self.predicted_depth = x_recon
+
         loss = self.loss_func(e, x_recon) / (n * h * w)
+        print(f"Final loss: {loss.item()}")
+        print(f"Final predicted x_recon shape (before returning loss): {x_recon.shape}")
 
-        # ✅ Additional residual loss based on difference threshold
         res = (x_in['HR'] + 1) / 2 - (x_in['SR'] + 1) / 2
         res = torch.mean(res, dim=1, keepdim=True)
-
         res_map = torch.where(res < 0.05, torch.zeros_like(res), torch.ones_like(res))
         
-        # ✅ Return the final loss
+        print(f"Returning loss and storing predicted depth.")
         return loss
+
 
 
     def forward(self, x, *args, **kwargs):
         return self.p_losses(x, *args, **kwargs)
+

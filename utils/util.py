@@ -121,16 +121,31 @@ def tensor2label(label_tensor, n_label, imtype=np.uint8, tile=False):
     return result
 
 
-def save_image(image_numpy, image_path, create_dir=False):
+def save_image(image_input, image_path, create_dir=False, normalize=True):
+    """
+    Saves an image from a PyTorch tensor or NumPy array to disk.
+    Supports automatic channel adjustment and format conversion.
+    """
     image_dir = Path(image_path).parent
     if not image_dir.exists():
         image_dir.mkdir(parents=True, exist_ok=True)
-    if len(image_numpy.shape) == 2:
-        image_numpy = np.expand_dims(image_numpy, axis=2)
-    if image_numpy.shape[2] == 1:
-        image_numpy = np.repeat(image_numpy, 3, 2)
-    image_pil = Image.fromarray(image_numpy)
+
+    if isinstance(image_input, torch.Tensor):
+        image_np = tensor2im(image_input, normalize=normalize)
+    elif isinstance(image_input, np.ndarray):
+        image_np = image_input
+    else:
+        raise TypeError("Expected input to be torch.Tensor or np.ndarray")
+
+    if len(image_np.shape) == 2:
+        image_np = np.expand_dims(image_np, axis=2)
+
+    if image_np.shape[2] == 1:
+        image_np = np.repeat(image_np, 3, axis=2)
+
+    image_pil = Image.fromarray(image_np.astype(np.uint8))
     image_pil.save(image_path.replace('.jpg', '.png'))
+
 
 
 def atoi(text):

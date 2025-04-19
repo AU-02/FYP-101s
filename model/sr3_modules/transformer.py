@@ -118,7 +118,57 @@ class UNet(nn.Module):
         self.upv9 = nn.ConvTranspose2d(dim*2, dim, 2, stride=2)
         self.ConvBlock9 = block(dim*2, dim, strides=1)
 
-        self.conv10 = nn.Conv2d(dim, 3, kernel_size=3, stride=1, padding=1)
+        self.conv10 = nn.Conv2d(dim, 1, kernel_size=3, stride=1, padding=1)
+    
+    # def __init__(self, block=ConvBlock, dim=32):
+    #     super(UNet, self).__init__()
+
+    #     self.dim = dim
+
+    #     # Change input channels from 4 → 1024 (SR + x_noisy)
+    #     self.ConvBlock1 = block(1024, dim, strides=1)
+    #     self.pool1 = nn.Conv2d(dim, dim, kernel_size=4, stride=2, padding=1)
+
+    #     self.ConvBlock2 = block(dim, dim * 2, strides=1)
+    #     self.pool2 = nn.Conv2d(dim * 2, dim * 2, kernel_size=4, stride=2, padding=1)
+
+    #     self.ConvBlock3 = block(dim * 2, dim * 4, strides=1)
+    #     self.pool3 = nn.Conv2d(dim * 4, dim * 4, kernel_size=4, stride=2, padding=1)
+
+    #     self.ConvBlock4 = block(dim * 4, dim * 8, strides=1)
+    #     self.pool4 = nn.Conv2d(dim * 8, dim * 8, kernel_size=4, stride=2, padding=1)
+
+    #     self.ConvBlock5 = block(dim * 8, dim * 16, strides=1)
+
+    #     self.upv6 = nn.ConvTranspose2d(dim * 16, dim * 8, 2, stride=2)
+    #     self.ConvBlock6 = block(dim * 16, dim * 8, strides=1)
+
+    #     self.upv7 = nn.ConvTranspose2d(dim * 8, dim * 4, 2, stride=2)
+    #     self.ConvBlock7 = block(dim * 8, dim * 4, strides=1)
+
+    #     self.upv8 = nn.ConvTranspose2d(dim * 4, dim * 2, 2, stride=2)
+    #     self.ConvBlock8 = block(dim * 4, dim * 2, strides=1)
+
+    #     self.upv9 = nn.ConvTranspose2d(dim * 2, dim, 2, stride=2)
+    #     self.ConvBlock9 = block(dim * 2, dim, strides=1)
+
+    #     # Final conv to 3 channels (you may change this to 1 if you're predicting depth map only)
+    #     self.conv10 = nn.Conv2d(dim, 1, kernel_size=3, stride=1, padding=1)
+
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
 
     def forward(self, x):
         conv1 = self.ConvBlock1(x)
