@@ -6,8 +6,9 @@
     "log": "logs",
     "tb_logger": "tb_logger",
     "results": "results",
-    "checkpoint": "checkpoints",
-    "resume_state": "experiments/depth_estimation_sr3_250406_120336/checkpoints/final_model.pth"
+    "checkpoint": "checkpoints"
+    // "resume_state": "D:/FYP-300-NIR/experiments/depth_estimation_sr3_250421_182041/checkpoints/I24000_E6"
+
   },
   "datasets": {
     "train": {
@@ -15,24 +16,24 @@
       "mode": "depth",
       "dataroot": "D:/FYP-001/MS2dataset",
       "datatype": "img",
-      "batch_size": 4,
+      "batch_size": 1,
       "num_workers": 4,
-      "use_shuffle": true,
-      "data_len": 10000   
+      "pin_memory": true,
+      "persistent_workers": true,
+      "use_shuffle": true
     },
     "val": {
       "name": "DepthValSet",
       "mode": "depth",
       "dataroot": "D:/FYP-001/MS2dataset",
-      "datatype": "img",
-      "data_len": 1000   
+      "datatype": "img"
     }
   },
   "model": {
     "which_model_G": "sr3",
     "finetune_norm": false,
     "unet": {
-      "in_channel": 2,
+      "in_channel": 1,
       "out_channel": 1,
       "inner_channel": 64,
       "norm_groups": 16,
@@ -62,13 +63,13 @@
     }
   },
   "train": {
-    "n_iter": 20000,               
+    "num_epochs": 100,               
     "val_freq": 500,
     "save_checkpoint_freq": 1000,
     "print_freq": 100,
     "optimizer": {
       "type": "adam",
-      "lr": 1e-5
+      "lr": 3e-5
     },
     "ema_scheduler": {
       "step_start_ema": 5000,

@@ -86,33 +86,8 @@ class DDPM(BaseModel, nn.Module):
         
     # Inside your model's forward method
     def forward(self, x_in):
-        # Print initial input shapes
-        print(f"Initial input shapes: {x_in['HR'].shape}, {x_in['SR'].shape}")
+        return self.p_losses(x_in)
 
-        # Assuming your model uses some layers, for example, self.netG
-        # If self.netG is a part of the DDPM model, print its details
-        print(f"Initial input to netG: {x_in['HR'].shape}")
-        
-        # Process through layers
-        x = self.netG(x_in)  # Process through your model's generator or network
-        print(f"After netG: {x.shape}")
-
-        # If you have any intermediate layers or transformations, check them
-        # For example, if there's a convolution layer
-        # x = self.conv_layer(x)
-        # print(f"After conv_layer: {x.shape}")
-
-        # Print the final output before any transformation
-        final_output = x  # Replace this with your final layer output
-        print(f"Final output before any post-processing: {final_output.shape}")
-        
-        # Check if the output is a valid tensor
-        if final_output.numel() == 0:
-            print("Error: Final output tensor is empty!")
-        else:
-            print(f"Final output shape: {final_output.shape}")
-        
-        return final_output
 
     # ✅ Updated to handle thermal + depth data
     def feed_data(self, data):
@@ -149,6 +124,8 @@ class DDPM(BaseModel, nn.Module):
                 'HR': self.data['input'],
                 'SR': self.data['input']
             }
+            
+        
 
         # Pass the input dictionary to the model.
         predicted_loss = self.netG(self.data['input'])
@@ -182,7 +159,6 @@ class DDPM(BaseModel, nn.Module):
         self.netG.eval()
 
         with torch.no_grad():
-            # ✅ Handle missing keys more gracefully
             input_data = self.data.get('input', {})
             if 'HR' not in input_data or 'SR' not in input_data:
                 raise KeyError(f"Missing keys in self.data['input']: {input_data.keys()}")
@@ -192,19 +168,37 @@ class DDPM(BaseModel, nn.Module):
                 'SR': input_data['SR']
             }
 
-            # ✅ Ensure SR and HR are 4D tensors (N, C, H, W)
+            # Ensure 4D (N, C, H, W)
+            if x_in['HR'].dim() == 3:
+                print(f"Unsqueezing HR from {x_in['HR'].shape}")
+                x_in['HR'] = x_in['HR'].unsqueeze(1)
             if x_in['SR'].dim() == 3:
                 print(f"Unsqueezing SR from {x_in['SR'].shape}")
                 x_in['SR'] = x_in['SR'].unsqueeze(1)
 
-            if x_in['HR'].dim() == 3:
-                print(f"Unsqueezing HR from {x_in['HR'].shape}")
-                x_in['HR'] = x_in['HR'].unsqueeze(1)
+            # Convert HR to channel-first if it's channels-last (N, H, W, C)
+            if x_in['HR'].shape[1] == x_in['HR'].shape[-1] and x_in['HR'].shape[1] not in [1, 3]:
+                print("Converting HR from channels-last to channels-first")
+                x_in['HR'] = x_in['HR'].permute(0, 3, 1, 2)
 
-            # ✅ Fix channel mismatch
+            # Convert SR to channel-first if needed
+            if x_in['SR'].shape[1] == x_in['SR'].shape[-1] and x_in['SR'].shape[1] not in [1, 3]:
+                print("Converting SR from channels-last to channels-first")
+                x_in['SR'] = x_in['SR'].permute(0, 3, 1, 2)
+
+            # ✅ Fix channel mismatch safely
             if x_in['HR'].shape[1] != x_in['SR'].shape[1]:
-                print(f"Fixing channel mismatch: HR {x_in['HR'].shape[1]} -> SR {x_in['SR'].shape[1]}")
-                x_in['HR'] = x_in['HR'].repeat(1, x_in['SR'].shape[1] // x_in['HR'].shape[1], 1, 1)
+                hr_c = x_in['HR'].shape[1]
+                sr_c = x_in['SR'].shape[1]
+                print(f"Fixing channel mismatch: HR {hr_c} -> SR {sr_c}")
+                if hr_c == 1 and sr_c > 1:
+                    x_in['HR'] = x_in['HR'].repeat(1, sr_c, 1, 1)
+                elif sr_c == 1 and hr_c > 1:
+                    x_in['SR'] = x_in['SR'].repeat(1, hr_c, 1, 1)
+                else:
+                    print("⚠️ Unhandled mismatch. Forcing both to 1 channel")
+                    x_in['HR'] = x_in['HR'][:, :1, :, :]
+                    x_in['SR'] = x_in['SR'][:, :1, :, :]
 
             # ✅ Fix spatial mismatch
             if x_in['HR'].shape[-2:] != x_in['SR'].shape[-2:]:
@@ -216,15 +210,22 @@ class DDPM(BaseModel, nn.Module):
                     align_corners=False
                 )
 
-            # ✅ Pass through the model
-            if isinstance(self.netG, nn.DataParallel):
-                self.output = self.netG.module(x_in)
-            else:
-                self.output = self.netG(x_in)
+            # ✅ Check empty tensor
+            if x_in['HR'].numel() == 0:
+                print(f"⚠️ HR tensor is empty. Shape: {x_in['HR'].shape}")
+                x_in['HR'] = torch.zeros_like(x_in['SR'])
 
-            # ✅ Make sure output is valid before resizing
+            # ✅ Forward pass
+            if isinstance(self.netG, nn.DataParallel):
+                self.netG.module(x_in)
+                self.output = self.netG.module.predicted_depth
+            else:
+                self.netG(x_in)
+                self.output = self.netG.predicted_depth
+
+            # ✅ Ensure output matches HR shape
             if self.output is not None and self.output.dim() > 0 and self.output.numel() > 0:
-                if self.output.shape != x_in['HR'].shape:
+                if self.output.shape[-2:] != x_in['HR'].shape[-2:]:
                     print(f"Resizing output from {self.output.shape} to {x_in['HR'].shape}")
                     self.output = F.interpolate(
                         self.output,
@@ -234,7 +235,6 @@ class DDPM(BaseModel, nn.Module):
                     )
             else:
                 print(f"⚠️ Model output is empty or invalid — output.shape = {self.output.shape if self.output is not None else 'None'}")
-            
 
         self.netG.train()
 
@@ -319,7 +319,7 @@ class DDPM(BaseModel, nn.Module):
         logger.info('Network G structure: {}, with parameters: {:,d}'.format(net_struc_str, n))
         logger.info(s)
 
-    # ✅ Updated checkpoint names for depth estimation
+    # Updated checkpoint names for depth estimation
     def save_network(self, epoch, iter_step):
         gen_path = os.path.join(self.opt['path']['checkpoint'], 'I{}_E{}_depth_gen.pth'.format(iter_step, epoch))
         opt_path = os.path.join(self.opt['path']['checkpoint'], 'I{}_E{}_depth_opt.pth'.format(iter_step, epoch))
@@ -336,18 +336,36 @@ class DDPM(BaseModel, nn.Module):
         torch.save(opt_state, opt_path)
 
     def load_network(self):
-        load_path = self.opt['path']['resume_state']
-        if load_path is not None:
-            logger.info('Loading pretrained model for G [{:s}] ...'.format(load_path))
-            gen_path = '{}_depth_gen.pth'.format(load_path)
-            opt_path = '{}_depth_opt.pth'.format(load_path)
+        load_path = self.opt['path'].get('resume_state', None)
+
+        logger.info(f"🔍 resume_state: {load_path}")
+
+        if load_path:
+            gen_path = f'{load_path}_depth_gen.pth'
+            opt_path = f'{load_path}_depth_opt.pth'
+
+            if not os.path.exists(gen_path) or not os.path.exists(opt_path):
+                logger.warning(f"⚠️ Checkpoint files not found at: {gen_path} or {opt_path}. Skipping resume.")
+                return
+
+            logger.info(f'📦 Loading pretrained model for G from [{gen_path}] ...')
             network = self.netG
             if isinstance(self.netG, nn.DataParallel):
                 network = network.module
-            network.load_state_dict(torch.load(gen_path), strict=False)
+
+            # ✅ PATCHED LOADING
+            pretrained_dict = torch.load(gen_path)
+            model_dict = network.state_dict()
+            matched_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and v.shape == model_dict[k].shape}
+            model_dict.update(matched_dict)
+            network.load_state_dict(model_dict, strict=False)
+            print(f"✅ Patched loading: Loaded {len(matched_dict)}/{len(model_dict)} parameters successfully!")
+
             if self.opt['phase'] == 'train':
                 opt = torch.load(opt_path)
                 self.optG.load_state_dict(opt['optimizer'])
-                self.begin_step = opt['iter']
-                self.begin_epoch = opt['epoch']
+                self.begin_step = opt.get('iter', 0)
+                self.begin_epoch = opt.get('epoch', 0)
                 self.ema_helper.load_state_dict(opt['ema_helper'])
+        else:
+            logger.info("🆕 Starting training from scratch (no resume_state).")

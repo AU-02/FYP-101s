@@ -164,7 +164,7 @@ class ResnetBlocWithAttn(nn.Module):
 class UNet(nn.Module):
     def __init__(
         self,
-        in_channel=2,  # Thermal + Noise
+        in_channel=1,  # NIR
         out_channel=1,  # Single-channel depth map output
         inner_channel=64,
         norm_groups=32,
@@ -241,10 +241,8 @@ class UNet(nn.Module):
 
 
     def forward(self, x, time):
-        x_lr = x[:, 0, :, :].unsqueeze(1)  # Thermal
-        x_noisy = x[:, 1, :, :].unsqueeze(1)  # Noise
-        
-        x = torch.cat((x_lr, x_noisy), dim=1)
+        # NIR-only input (already single-channel)
+        # If input shape is [B, 1, H, W], no changes needed
 
         t = self.noise_level_mlp(time) if exists(self.noise_level_mlp) else None
 

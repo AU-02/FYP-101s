@@ -87,7 +87,9 @@ def save_tensor_image(tensor, path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('-c', '--config', type=str, default='D:/FYP-200_git/FYP-101s/config/shadow.json',
+    # parser.add_argument('-c', '--config', type=str, default='D:/FYP-300-NIR/FYP-101s/config/shadow.json',
+    #                     help='JSON file for configuration')
+    parser.add_argument('-c', '--config', type=str, default='D:/FYP-101s/config/shadow.json',
                         help='JSON file for configuration')
     parser.add_argument('-p', '--phase', type=str, choices=['train', 'val'],
                         help='Run either train(training) or val(generation)', default='train')
@@ -101,6 +103,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
     opt = Logger.parse(args)
     opt = Logger.dict_to_nonedict(opt)
+    # ✅ FORCE overwrite to match old checkpoint model
+    opt['model']['unet']['inner_channel'] = 64
+    opt['model']['unet']['channel_multiplier'] = [1, 2, 4, 8]
+    opt['path']['resume_state'] = "D:/FYP-300-NIR/experiments/depth_estimation_sr3_250426_222341/experiments/depth_estimation_sr3_250424_102919/checkpoints/I106000_E29"
+
+
+
 
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = True
@@ -134,40 +143,55 @@ if __name__ == "__main__":
                 dataset_opt['dataroot'],
                 data_split='train',
                 data_format='MonoDepth',
-                modality='thr',
+                modality='nir',
                 sampling_step=3,
                 set_length=1,
                 set_interval=1
             )
-            train_loader = torch.utils.data.DataLoader(train_set, batch_size=1, shuffle=True)
+            train_loader = torch.utils.data.DataLoader(
+                train_set,
+                batch_size=dataset_opt['batch_size'],
+                shuffle=dataset_opt['use_shuffle'],
+                num_workers=dataset_opt.get('num_workers', 0),
+                pin_memory=True
+            )
+
         elif phase == 'val':
             val_set = DataLoader_MS2(
                 dataset_opt['dataroot'],
                 data_split='val',
                 data_format='MonoDepth',
-                modality='thr',
+                modality='nir',
                 sampling_step=3,
                 set_length=1,
                 set_interval=1
             )
-            val_loader = torch.utils.data.DataLoader(val_set, batch_size=1, shuffle=False)
+            val_loader = torch.utils.data.DataLoader(
+                val_set,
+                batch_size=1,  # or dataset_opt.get('batch_size', 1) if you later want to configure this too
+                shuffle=False,
+                num_workers=dataset_opt.get('num_workers', 0),
+                pin_memory=True
+            )
+
 
     logger.info('Initial Dataset Loaded')
-
+    print(opt['model']['unet'])
     diffusion = Model.create_model(opt).to(device)
     logger.info('Model Created')
 
     current_step = diffusion.begin_step
     current_epoch = diffusion.begin_epoch
-    n_iter = opt['train']['n_iter']
+    num_epochs = opt['train']['num_epochs']
 
     diffusion.set_new_noise_schedule(opt['model']['beta_schedule'][opt['phase']], schedule_phase=opt['phase'])
 
     logger.info("Start Training Loop...")
     start_time = time.time()
 
-    while current_step < n_iter:
-        current_epoch += 1
+    for epoch in range(current_epoch, num_epochs):
+        current_epoch = epoch
+        logger.info(f"Epoch [{epoch + 1}/{num_epochs}]")
         for _, train_data in enumerate(train_loader):
             current_step += 1
 
@@ -179,19 +203,16 @@ if __name__ == "__main__":
                 logger.info(f"Predicted shape: {visuals['Predicted'].shape}")  # Log the predicted shape
 
                 tb_logger.add_scalar('loss/l_pix', diffusion.log_dict['l_pix'], current_step)
-                logger.info(f"[Step {current_step}] l_pix: {diffusion.log_dict['l_pix']:.6f}")
+                logger.info(f"[Epoch {epoch + 1}/{num_epochs}] [Step {current_step}] l_pix: {diffusion.log_dict['l_pix']:.6f}")
+
 
                 save_tensor_image(visuals['Input'], f"{opt['path']['results']}/input_{current_step}.png")
                 save_tensor_image(visuals['GT'], f"{opt['path']['results']}/gt_{current_step}.png")
-                # Save only the predicted depth map (if Predicted has 2 channels, use channel 0)
-                if visuals['Predicted'].shape[1] == 2:
-                    pred_to_save = visuals['Predicted'][:, 0:1, :, :]
-                else:
-                    pred_to_save = visuals['Predicted']
+                pred_to_save = visuals['Predicted']
                 save_tensor_image(pred_to_save, f"{opt['path']['results']}/pred_{current_step}.png")
 
             if current_step % opt['train']['val_freq'] == 0:
-                logger.info(f"Validation at step {current_step}...")
+                logger.info(f"Validation at step {current_step}... (Epoch {epoch + 1})")
                 avg_mae, avg_rmse = 0.0, 0.0
                 val_step = 0
                 for val_data in val_loader:
@@ -200,6 +221,7 @@ if __name__ == "__main__":
                     visuals = diffusion.get_current_visuals()
                     pred = visuals['Predicted'].squeeze().cpu().numpy()
                     gt = visuals['GT'].squeeze().cpu().numpy()
+                    print(f"📏 pred shape: {pred.shape}, gt shape: {gt.shape}")
                     val_mae = np.mean(np.abs(pred - gt))
                     val_rmse = np.sqrt(np.mean((pred - gt) ** 2))
                     avg_mae += val_mae
@@ -213,9 +235,12 @@ if __name__ == "__main__":
 
             if current_step % opt['train']['save_checkpoint_freq'] == 0:
                 diffusion.save_network(current_epoch, current_step)
-
-            if current_step >= n_iter:
-                break
+                
+                # Save the effective config at this checkpoint
+                effective_config_path = os.path.join(opt['path']['checkpoint'], f'effective_opt_{current_step}.json')
+                with open(effective_config_path, 'w') as f:
+                    json.dump(opt, f, indent=4)
+                logger.info("Saved effective configuration to %s", effective_config_path)
 
     save_path = os.path.join(opt['path']['checkpoint'], 'final_model.pth')
     os.makedirs(os.path.dirname(save_path), exist_ok=True)

@@ -71,13 +71,13 @@ class GaussianDiffusion(nn.Module):
         self,
         denoise_fn,
         image_size,
-        channels=3,
+        channels=1,
         loss_type='l1',
         conditional=True,
         schedule_opt=None
     ):
         super().__init__()
-        self.channels = 1
+        self.channels = channels
         self.image_size = image_size
         self.denoise_fn = denoise_fn
         self.loss_type = loss_type
@@ -203,8 +203,6 @@ class GaussianDiffusion(nn.Module):
         #mask removed
         b = self.betas
         eta = 0.
-        gamma_ori = 0.1
-        idx = 0
         # sample_inter = (1 | (self.num_timesteps//10))
         seq_next = [-1] + list(seq[:-1])
         # mask = mask_0  REMOVE
@@ -216,9 +214,7 @@ class GaussianDiffusion(nn.Module):
             xt = xs[-1].to('cuda')
             
             if i >= len(b)*0.2:
-                et= self.denoise_fn(torch.cat([x_lr, xt], dim=1), t)
-            else:
-                et= self.denoise_fn(torch.cat([x_lr, xt], dim=1), t)
+                et = self.denoise_fn(x_lr, t)
             x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
             x0_preds.append(x0_t.to('cpu'))
             c1 = eta * ((1 - at / at_next) * (1 - at_next) / (1 - at)).sqrt()
@@ -308,12 +304,12 @@ class GaussianDiffusion(nn.Module):
             x_in['SR'] = x_in['SR'].unsqueeze(0)
 
         # Fix channel mismatches by repeating if needed.
-        if x_in['HR'].shape[1] != 2:
-            print(f"Fixing HR channel mismatch: {x_in['HR'].shape[1]} -> 2")
-            x_in['HR'] = x_in['HR'].repeat(1, 2, 1, 1)
-        if x_in['SR'].shape[1] != 2:
-            print(f"Fixing SR channel mismatch: {x_in['SR'].shape[1]} -> 2")
-            x_in['SR'] = x_in['SR'].repeat(1, 2, 1, 1)
+        # if x_in['HR'].shape[1] != 2:
+        #     print(f"Fixing HR channel mismatch: {x_in['HR'].shape[1]} -> 2")
+        #     x_in['HR'] = x_in['HR'].repeat(1, 2, 1, 1)
+        # if x_in['SR'].shape[1] != 2:
+        #     print(f"Fixing SR channel mismatch: {x_in['SR'].shape[1]} -> 2")
+        #     x_in['SR'] = x_in['SR'].repeat(1, 2, 1, 1)
 
         # Fix spatial dimensions: make SR match HR.
         if x_in['SR'].shape[-2:] != x_in['HR'].shape[-2:]:
@@ -359,10 +355,11 @@ class GaussianDiffusion(nn.Module):
 
         print(f"Final SR shape before concat: {x_in['SR'].shape}")
         print(f"Final noisy shape before concat: {x_noisy.shape}")
-        x_cat = torch.cat([x_in['HR'], x_noisy], dim=1)
-        print(f"x_cat shape (after concat): {x_cat.shape}")
+        # x_cat = torch.cat([x_in['HR'], x_noisy], dim=1)
+        # print(f"x_cat shape (after concat): {x_cat.shape}")
 
-        x_recon = self.denoise_fn(x_cat, t.float())
+        x_recon = self.denoise_fn(x_noisy, t.float())
+
         print(f"x_recon shape after denoise_fn: {x_recon.shape}")
 
         # Resize x_recon to match HR spatial dimensions exactly.
@@ -396,4 +393,3 @@ class GaussianDiffusion(nn.Module):
 
     def forward(self, x, *args, **kwargs):
         return self.p_losses(x, *args, **kwargs)
-
